@@ -71,7 +71,7 @@ You'll need Python 3.12 or newer, an OpenRouter API key, and a Postgres
 database (a free [Neon](https://neon.tech) instance works fine).
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/Deji-404/jaysdiner_agent.git
 cd jaysdiner_agent
 python3 -m venv venv
 source venv/bin/activate
