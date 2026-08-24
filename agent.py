@@ -1,5 +1,5 @@
 """
-The conversational agent, wraps browser_tools.py functions as LangChain
+The conversational agent — wraps browser_tools.py functions as LangChain
 tools, uses gpt-4o-mini via OpenRouter for the actual conversation, and
 persists state per conversation_id via LangGraph's checkpointer.
 
@@ -10,13 +10,13 @@ Ordering flow through tools:
                                                charged yet
   place_order_tool                         -> places a REAL order with a
                                                pending payment. Requires an
-                                               explicit confirmation flag,
+                                               explicit confirmation flag —
                                                see its docstring.
 
 NOTE ON MONEY SAFETY: place_order_tool refuses to run unless
 user_confirmed_final_total=True is passed, and its own return value (when
 refused) instructs the model to summarize and ask the user first. This is
-a pragmatic single-process guard, not a hard LangGraph interrupt, worth
+a pragmatic single-process guard, not a hard LangGraph interrupt — worth
 hardening into a real human-in-the-loop interrupt before this handles
 real customer traffic at scale.
 """
@@ -60,7 +60,7 @@ def get_full_menu() -> str:
     """Get Jay's Diner's full menu with prices, categories, and image URLs,
     plus whether the store is currently accepting orders. Use this whenever
     the user asks what's available, wants to browse, or you need current
-    prices. Returns JSON, summarize it naturally for the user, don't dump
+    prices. Returns JSON — summarize it naturally for the user, don't dump
     raw JSON in your reply."""
     inv = get_menu_inventory()
     payload = {
@@ -84,7 +84,7 @@ def check_items_available(item_names: list[str]) -> str:
     """Check whether specific requested items exist on the menu, with fuzzy
     matching (e.g. 'burger' matches 'Nashville Burger'). Use this when the
     user names specific items they want, to confirm exact names and prices
-    before adding to cart. Returns JSON, summarize it naturally for the
+    before adding to cart. Returns JSON — summarize it naturally for the
     user, don't dump raw JSON in your reply."""
     inv = get_menu_inventory()
     matches = match_requested_items(item_names, inv)
@@ -107,9 +107,9 @@ def check_items_available(item_names: list[str]) -> str:
 def check_item_options(item_names: list[str]) -> str:
     """Check what customization options (spice level, sauce, side choices,
     etc.) specific menu items have, and which are required vs optional.
-    item_names must be the EXACT menu names, use check_items_available
+    item_names must be the EXACT menu names — use check_items_available
     first if you're not sure of the exact spelling. Call this before adding
-    any item that might have required choices. Returns JSON, summarize it
+    any item that might have required choices. Returns JSON — summarize it
     naturally for the user, don't dump raw JSON in your reply."""
     inv = get_menu_inventory()
     result = check_order_options(inv, item_names)
@@ -122,10 +122,10 @@ def add_items_to_cart_tool(items_json: str) -> str:
     [{"name": "BUFFALO TENDERS", "quantity": 1, "option_preferences": {}},
      {"name": "SHRIMP ISLAND", "quantity": 1, "option_preferences": {"Choose Sauce": ["Pink Sauce"]}}]
     Use exact menu names (from check_items_available). option_preferences
-    maps an option group name to the chosen label(s), omit a group to get
+    maps an option group name to the chosen label(s) — omit a group to get
     a sensible automatic default (cheapest choice if required, untouched
-    if optional). This does NOT charge anything, it just stages the cart.
-    Returns JSON, summarize it naturally for the user, don't dump raw JSON
+    if optional). This does NOT charge anything — it just stages the cart.
+    Returns JSON — summarize it naturally for the user, don't dump raw JSON
     in your reply."""
     inv = get_menu_inventory()
     raw_items = json.loads(items_json)
@@ -151,7 +151,7 @@ def place_order_tool(
     user_confirmed_final_total: bool = False,
     config: RunnableConfig = None,
 ) -> str:
-    """Place the REAL order, this creates an actual pending order that
+    """Place the REAL order — this creates an actual pending order that
     will need payment. items_json is the same format as
     add_items_to_cart_tool. delivery_or_pickup must be "delivery" or
     "takeaway". area is required for delivery (must be one of: Chevron,
@@ -162,7 +162,7 @@ def place_order_tool(
     that they want to place the order, AFTER you have shown them the
     exact items and total price. If you call this with
     user_confirmed_final_total=False (or omit it), this tool will NOT
-    place the order, it will instead tell you to summarize the order
+    place the order — it will instead tell you to summarize the order
     and total and ask the user to confirm first."""
     if not user_confirmed_final_total:
         return json.dumps({
@@ -193,20 +193,20 @@ def place_order_tool(
         return json.dumps({"status": "failed", "message": order_result.notes})
 
     # Remembered here (not sent back to the model) so get_transfer_details_tool
-    # can read it directly, keeps the Paystack public key and customer email
+    # can read it directly — keeps the Paystack public key and customer email
     # out of the model's context, and avoids relying on the model to
     # correctly carry those values forward into the next tool call.
     # Keyed by thread_id (injected automatically by LangGraph via
     # RunnableConfig, never exposed to the model's tool-calling schema) so
     # concurrent conversations from different users never clobber each
-    # other's order state, this used to be a single bare global, which
+    # other's order state — this used to be a single bare global, which
     # would have leaked one customer's order into another's payment flow
     # the moment two people used this at the same time.
     thread_id = (config or {}).get("configurable", {}).get("thread_id", "unknown")
     _last_order_results[thread_id] = order_result
 
     # Enrich each ordered item with its image + actual line price for the
-    # order-history detail view, cart_results already has the price, and
+    # order-history detail view — cart_results already has the price, and
     # inventory has the image, neither of which the model itself needs to
     # see, but the frontend does.
     inventory_by_name = {i.name: i for i in inv.items}
@@ -230,7 +230,7 @@ def place_order_tool(
     })
 
 
-# Keyed by thread_id, not a bare global, see the comment inside
+# Keyed by thread_id, not a bare global — see the comment inside
 # place_order_tool above for why this matters.
 _last_order_results: dict[str, PlaceOrderResult] = {}
 
@@ -241,7 +241,7 @@ def get_transfer_details_tool(config: RunnableConfig = None) -> str:
     returned status "placed"), call this with no arguments to prepare
     payment behind the scenes. This can take a few seconds since it
     involves loading the payment gateway. Returns JSON with the amount and
-    a reference, payment now happens entirely through a Monei payment
+    a reference — payment now happens entirely through a Monei payment
     card the interface shows the customer; you do not need or receive any
     bank/account details, and must never describe a manual bank transfer."""
     thread_id = (config or {}).get("configurable", {}).get("thread_id", "unknown")
@@ -259,7 +259,7 @@ def get_transfer_details_tool(config: RunnableConfig = None) -> str:
 
     # bank_name/account_number are deliberately withheld from what the
     # model sees, same reasoning as the Paystack public key/customer email
-    # above, a model that can see an account number will eventually
+    # above — a model that can see an account number will eventually
     # recite it regardless of what the system prompt says not to do.
     # api.py reads the real values via get_last_transfer_details() instead,
     # which never touches agent/LLM context. Also keyed by thread_id now,
@@ -277,7 +277,7 @@ _last_transfer_details_by_thread: dict[str, TransferDetails] = {}
 
 
 def get_last_transfer_details(thread_id: str) -> Optional[dict]:
-    """Backend-only accessor, NOT a tool, never exposed to the model.
+    """Backend-only accessor — NOT a tool, never exposed to the model.
     api.py calls this (with the SAME thread_id it used for this
     conversation turn) to get the real bank_name/account_number needed to
     actually execute the Monei payout, without those values ever having
@@ -330,29 +330,55 @@ def _llm() -> ChatOpenAI:
     )
 
 
-_checkpointer = MemorySaver()
+import asyncio
 
-# Postgres-backed persistence when a real database is configured (i.e.
-# whenever this isn't pure local SQLite testing), conversation history
-# used to live entirely in process memory, meaning it vanished on every
-# restart or redeploy, and would behave incorrectly the moment more than
-# one server instance is ever run. This makes conversations durable and
-# safe to scale, at the cost of one connection kept open for the app's
-# whole lifetime.
-if DATABASE_URL.startswith("postgres"):
-    from langgraph.checkpoint.postgres import PostgresSaver
+_agent_instance = None
+_agent_lock = asyncio.Lock()
+_checkpointer_cm = None  # kept open for the app's whole lifetime, never exited
 
-    _postgres_checkpointer_cm = PostgresSaver.from_conn_string(DATABASE_URL)
-    _checkpointer = _postgres_checkpointer_cm.__enter__()
-    _checkpointer.setup()  # idempotent, creates the checkpoint tables if they don't exist yet
 
-_agent = create_react_agent(_llm(), TOOLS, prompt=SYSTEM_PROMPT, checkpointer=_checkpointer)
+async def _get_agent():
+    """Builds the compiled agent once, on first real use, and reuses it
+    after that. This has to happen lazily rather than at plain module
+    import time, because the Postgres checkpointer needs an async
+    connection that's tied to whatever event loop creates it. Building it
+    eagerly at import time (before uvicorn's event loop is even running)
+    is exactly the bug that broke chat in production: on localhost,
+    DATABASE_URL was SQLite, so this fell back to the in-memory
+    checkpointer, which has no such requirement and worked fine either
+    way. On Railway, DATABASE_URL is real Postgres, and the connection
+    ended up attached to the wrong event loop, which is why every single
+    message failed there while everything else worked.
+
+    Building it here instead, the first time a real request calls
+    stream_agent_turn, guarantees the connection is created inside the
+    actual event loop that will go on to serve every request after it."""
+    global _agent_instance, _checkpointer_cm
+
+    if _agent_instance is not None:
+        return _agent_instance
+
+    async with _agent_lock:
+        if _agent_instance is not None:
+            return _agent_instance
+
+        if DATABASE_URL.startswith("postgres"):
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+            _checkpointer_cm = AsyncPostgresSaver.from_conn_string(DATABASE_URL)
+            checkpointer = await _checkpointer_cm.__aenter__()
+            await checkpointer.setup()  # idempotent, creates the checkpoint tables if they don't exist yet
+        else:
+            checkpointer = MemorySaver()
+
+        _agent_instance = create_react_agent(_llm(), TOOLS, prompt=SYSTEM_PROMPT, checkpointer=checkpointer)
+        return _agent_instance
 
 
 def _build_messages(user_message: str, checkout_context: Optional[dict]) -> list[dict]:
     """Prepend a system message with the logged-in user's saved checkout
     info, if any, so the model can use it without asking every time. Sent
-    every turn (not just the first), small enough in size that the
+    every turn (not just the first) — small enough in size that the
     context-bloat cost is worth not having to track "is this a new
     conversation" separately."""
     messages = []
@@ -360,7 +386,7 @@ def _build_messages(user_message: str, checkout_context: Optional[dict]) -> list
         messages.append({
             "role": "system",
             "content": (
-                "The logged-in user has a saved checkout profile, use these "
+                "The logged-in user has a saved checkout profile — use these "
                 "details by default when placing an order instead of asking "
                 "for them again, but confirm them with the user first and let "
                 "them override anything they want to change: "
@@ -375,10 +401,19 @@ def run_agent_turn(thread_id: str, user_message: str, checkout_context: Optional
     """Run one turn of the conversation. LangGraph's checkpointer keeps
     the full message history keyed by thread_id, so each call only needs
     the new user message. thread_id should already be scoped to the
-    authenticated user (see api.py), this function doesn't enforce that
-    itself, it just uses whatever key it's given."""
+    authenticated user (see api.py) — this function doesn't enforce that
+    itself, it just uses whatever key it's given.
+
+    Note: the actual deployed frontend only ever calls stream_agent_turn
+    below, via /chat/stream. This sync path isn't wired up to anything
+    real right now, and doesn't correctly support the async Postgres
+    checkpointer, it would hit the same event-loop mismatch that used to
+    break streaming chat in production. Fine for local MemorySaver
+    testing, would need converting to async before it could safely back
+    a real Postgres-backed deployment."""
+    agent = asyncio.run(_get_agent())
     config = {"configurable": {"thread_id": thread_id}}
-    result = _agent.invoke(
+    result = agent.invoke(
         {"messages": _build_messages(user_message, checkout_context)},
         config=config,
     )
@@ -386,7 +421,7 @@ def run_agent_turn(thread_id: str, user_message: str, checkout_context: Optional
     return last_message.content
 
 # ---------------------------------------------------------------------------
-# Streaming, SSE event protocol
+# Streaming — SSE event protocol
 # ---------------------------------------------------------------------------
 #
 # Event shapes, one JSON object per SSE "data:" line:
@@ -398,7 +433,7 @@ def run_agent_turn(thread_id: str, user_message: str, checkout_context: Optional
 #   {"type": "error", "message": "..."}
 #
 # "output" on tool_end is JSON-parsed when the tool returned JSON (which is
-# every tool now), that's the payload a frontend uses to render custom UI
+# every tool now) — that's the payload a frontend uses to render custom UI
 # (e.g. a menu grid with images) for that specific tool. Fall back to the
 # raw string if a tool ever returns plain text.
 
@@ -424,23 +459,24 @@ async def stream_agent_turn(
 ):
     """Async generator yielding SSE-formatted strings for one turn.
 
-    thread_id: the LangGraph checkpointer key, should be scoped to the
+    thread_id: the LangGraph checkpointer key — should be scoped to the
     authenticated user (e.g. "user:<user_id>:<conversation_id>") so one
     user can never read another user's conversation state, even by
     guessing or reusing a conversation_id. See api.py.
 
     conversation_id: the plain, client-facing ID echoed back in the
-    "start" event, deliberately NOT the same as thread_id, so the
+    "start" event — deliberately NOT the same as thread_id, so the
     user-scoping prefix never leaks to the client.
 
     checkout_context: the logged-in user's saved default checkout
-    profile (if any), injected as context every turn, see
+    profile (if any), injected as context every turn — see
     _build_messages."""
     config = {"configurable": {"thread_id": thread_id}}
     yield _sse({"type": "start", "conversation_id": conversation_id})
 
     try:
-        async for event in _agent.astream_events(
+        agent = await _get_agent()
+        async for event in agent.astream_events(
             {"messages": _build_messages(user_message, checkout_context)},
             config=config,
             version="v2",
