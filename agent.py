@@ -373,6 +373,14 @@ async def _get_agent():
                 conninfo=DATABASE_URL,
                 max_size=10,
                 kwargs={"autocommit": True, "prepare_threshold": 0},
+                # Checks a connection is actually alive right before
+                # handing it out, the same idea as SQLAlchemy's
+                # pool_pre_ping on the other connection. Neon can close a
+                # connection at any moment when it suspends, this doesn't
+                # stop that from happening, nothing can, but it catches
+                # more of the dead ones at borrow time instead of only
+                # discovering they're dead mid-query.
+                check=AsyncConnectionPool.check_connection,
                 open=False,
             )
             await _checkpointer_pool.open()
@@ -484,52 +492,88 @@ async def stream_agent_turn(
     config = {"configurable": {"thread_id": thread_id}}
     yield _sse({"type": "start", "conversation_id": conversation_id})
 
-    try:
-        agent = await _get_agent()
-        async for event in agent.astream_events(
-            {"messages": _build_messages(user_message, checkout_context)},
-            config=config,
-            version="v2",
-        ):
-            kind = event["event"]
+    # A dropped connection can still happen occasionally even with a
+    # pool in front of it, Neon can close a connection at the exact
+    # moment it's mid-use, not just while idle. When that happens right
+    # at the start of a turn (loading the conversation's prior state,
+    # before any tool has run) it's completely safe to quietly retry
+    # with a fresh connection, since nothing has happened yet. Once a
+    # single tool_start or piece of the reply has already streamed to
+    # the user, retrying is no longer safe, a tool might have already
+    # run, so from that point on a failure is just shown, not retried.
+    max_attempts = 2
+    any_event_emitted = False
 
-            if kind == "on_tool_start":
-                yield _sse({
-                    "type": "tool_start",
-                    "tool": event["name"],
-                    "args": event["data"].get("input"),
-                })
+    for attempt in range(1, max_attempts + 1):
+        try:
+            agent = await _get_agent()
+            async for event in agent.astream_events(
+                {"messages": _build_messages(user_message, checkout_context)},
+                config=config,
+                version="v2",
+            ):
+                kind = event["event"]
 
-            elif kind == "on_tool_end":
-                raw_output = event["data"].get("output")
-                content = getattr(raw_output, "content", raw_output)
-                parsed = _try_parse_json(content)
-                yield _sse({
-                    "type": "tool_end",
-                    "tool": event["name"],
-                    "output": parsed if parsed is not None else content,
-                })
+                if kind == "on_tool_start":
+                    any_event_emitted = True
+                    yield _sse({
+                        "type": "tool_start",
+                        "tool": event["name"],
+                        "args": event["data"].get("input"),
+                    })
 
-            elif kind == "on_chat_model_stream":
-                chunk = event["data"].get("chunk")
-                text = getattr(chunk, "content", "") if chunk is not None else ""
-                if text:
-                    yield _sse({"type": "text_delta", "content": text})
+                elif kind == "on_tool_end":
+                    any_event_emitted = True
+                    raw_output = event["data"].get("output")
+                    content = getattr(raw_output, "content", raw_output)
+                    parsed = _try_parse_json(content)
+                    yield _sse({
+                        "type": "tool_end",
+                        "tool": event["name"],
+                        "output": parsed if parsed is not None else content,
+                    })
 
-    except Exception as e:
-        message = str(e)
-        # A dangling tool call with no matching result means an earlier
-        # turn in THIS conversation got interrupted mid-flight (a network
-        # blip while a tool was running) and left a broken checkpoint
-        # behind. The conversation can't continue from that point, ever,
-        # no amount of retrying the next message fixes it. Say so plainly
-        # instead of surfacing LangGraph's internal validation error.
-        if "corresponding ToolMessage" in message or "INVALID_CHAT_HISTORY" in message:
-            message = (
-                "This conversation hit an error partway through an earlier "
-                "step and can't continue. Please start a new chat, sorry "
-                "about that."
+                elif kind == "on_chat_model_stream":
+                    chunk = event["data"].get("chunk")
+                    text = getattr(chunk, "content", "") if chunk is not None else ""
+                    if text:
+                        any_event_emitted = True
+                        yield _sse({"type": "text_delta", "content": text})
+
+            break  # completed without error, nothing left to retry
+
+        except Exception as e:
+            message = str(e)
+            is_connection_error = any(
+                s in message
+                for s in (
+                    "SSL connection",
+                    "consuming input failed",
+                    "connection is closed",
+                    "connection already closed",
+                )
             )
-        yield _sse({"type": "error", "message": message})
+
+            if is_connection_error and not any_event_emitted and attempt < max_attempts:
+                continue  # quiet retry, nothing has reached the user yet
+
+            # A dangling tool call with no matching result means an
+            # earlier turn in THIS conversation got interrupted
+            # mid-flight and left a broken checkpoint behind. The
+            # conversation can't continue from that point, ever, no
+            # amount of retrying the next message fixes it. Say so
+            # plainly instead of surfacing LangGraph's internal
+            # validation error.
+            if "corresponding ToolMessage" in message or "INVALID_CHAT_HISTORY" in message:
+                message = (
+                    "This conversation hit an error partway through an earlier "
+                    "step and can't continue. Please start a new chat, sorry "
+                    "about that."
+                )
+            elif is_connection_error:
+                message = "Lost connection partway through that, please try again."
+
+            yield _sse({"type": "error", "message": message})
+            break
 
     yield _sse({"type": "done"})
