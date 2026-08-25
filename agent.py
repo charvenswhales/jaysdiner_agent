@@ -327,6 +327,11 @@ def _llm() -> ChatOpenAI:
         api_key=OPENROUTER_API_KEY,
         max_completion_tokens=2048,
         timeout=60,
+        # Automatically retries transient failures (dropped connections,
+        # rate limits, brief network blips) a few times before giving up,
+        # rather than surfacing the very first hiccup straight to the
+        # user as a broken conversation.
+        max_retries=3,
     )
 
 
@@ -334,26 +339,24 @@ import asyncio
 
 _agent_instance = None
 _agent_lock = asyncio.Lock()
-_checkpointer_cm = None  # kept open for the app's whole lifetime, never exited
+_checkpointer_pool = None  # kept open for the app's whole lifetime
 
 
 async def _get_agent():
     """Builds the compiled agent once, on first real use, and reuses it
     after that. This has to happen lazily rather than at plain module
     import time, because the Postgres checkpointer needs an async
-    connection that's tied to whatever event loop creates it. Building it
-    eagerly at import time (before uvicorn's event loop is even running)
-    is exactly the bug that broke chat in production: on localhost,
-    DATABASE_URL was SQLite, so this fell back to the in-memory
-    checkpointer, which has no such requirement and worked fine either
-    way. On Railway, DATABASE_URL is real Postgres, and the connection
-    ended up attached to the wrong event loop, which is why every single
-    message failed there while everything else worked.
+    connection that's tied to whatever event loop creates it.
 
-    Building it here instead, the first time a real request calls
-    stream_agent_turn, guarantees the connection is created inside the
-    actual event loop that will go on to serve every request after it."""
-    global _agent_instance, _checkpointer_cm
+    Uses a connection pool rather than a single raw connection. The first
+    version of this held one connection open for the app's entire
+    lifetime, which worked for a while and then started failing with
+    "the connection is closed" on both localhost and Railway. Neon is
+    serverless Postgres and closes idle connections when it suspends, so
+    a single long-lived connection is guaranteed to die eventually. A
+    pool replaces a dead connection with a fresh one automatically
+    instead of getting stuck reusing one that no longer works."""
+    global _agent_instance, _checkpointer_pool
 
     if _agent_instance is not None:
         return _agent_instance
@@ -363,10 +366,17 @@ async def _get_agent():
             return _agent_instance
 
         if DATABASE_URL.startswith("postgres"):
+            from psycopg_pool import AsyncConnectionPool
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-            _checkpointer_cm = AsyncPostgresSaver.from_conn_string(DATABASE_URL)
-            checkpointer = await _checkpointer_cm.__aenter__()
+            _checkpointer_pool = AsyncConnectionPool(
+                conninfo=DATABASE_URL,
+                max_size=10,
+                kwargs={"autocommit": True, "prepare_threshold": 0},
+                open=False,
+            )
+            await _checkpointer_pool.open()
+            checkpointer = AsyncPostgresSaver(_checkpointer_pool)
             await checkpointer.setup()  # idempotent, creates the checkpoint tables if they don't exist yet
         else:
             checkpointer = MemorySaver()
@@ -507,6 +517,19 @@ async def stream_agent_turn(
                     yield _sse({"type": "text_delta", "content": text})
 
     except Exception as e:
-        yield _sse({"type": "error", "message": str(e)})
+        message = str(e)
+        # A dangling tool call with no matching result means an earlier
+        # turn in THIS conversation got interrupted mid-flight (a network
+        # blip while a tool was running) and left a broken checkpoint
+        # behind. The conversation can't continue from that point, ever,
+        # no amount of retrying the next message fixes it. Say so plainly
+        # instead of surfacing LangGraph's internal validation error.
+        if "corresponding ToolMessage" in message or "INVALID_CHAT_HISTORY" in message:
+            message = (
+                "This conversation hit an error partway through an earlier "
+                "step and can't continue. Please start a new chat, sorry "
+                "about that."
+            )
+        yield _sse({"type": "error", "message": message})
 
     yield _sse({"type": "done"})
