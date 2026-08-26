@@ -217,3 +217,15 @@ async def chat_stream(
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/store-status")
+def store_status():
+    """Public, no login needed. Pure time-of-day computation, no network
+    call to Jay's Diner required, so this is safe to call proactively on
+    page load rather than waiting for someone to actually ask the agent
+    about the menu."""
+    from browser_tools import get_store_hours_status
+
+    is_open, note = get_store_hours_status()
+    return {"accepting_orders": is_open, "status_note": note}

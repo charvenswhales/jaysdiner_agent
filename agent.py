@@ -1,5 +1,5 @@
 """
-The conversational agent — wraps browser_tools.py functions as LangChain
+The conversational agent, wraps browser_tools.py functions as LangChain
 tools, uses gpt-4o-mini via OpenRouter for the actual conversation, and
 persists state per conversation_id via LangGraph's checkpointer.
 
@@ -16,7 +16,7 @@ Ordering flow through tools:
 NOTE ON MONEY SAFETY: place_order_tool refuses to run unless
 user_confirmed_final_total=True is passed, and its own return value (when
 refused) instructs the model to summarize and ask the user first. This is
-a pragmatic single-process guard, not a hard LangGraph interrupt — worth
+a pragmatic single-process guard, not a hard LangGraph interrupt, worth
 hardening into a real human-in-the-loop interrupt before this handles
 real customer traffic at scale.
 """
@@ -60,7 +60,7 @@ def get_full_menu() -> str:
     """Get Jay's Diner's full menu with prices, categories, and image URLs,
     plus whether the store is currently accepting orders. Use this whenever
     the user asks what's available, wants to browse, or you need current
-    prices. Returns JSON — summarize it naturally for the user, don't dump
+    prices. Returns JSON, summarize it naturally for the user, don't dump
     raw JSON in your reply."""
     inv = get_menu_inventory()
     payload = {
@@ -84,7 +84,7 @@ def check_items_available(item_names: list[str]) -> str:
     """Check whether specific requested items exist on the menu, with fuzzy
     matching (e.g. 'burger' matches 'Nashville Burger'). Use this when the
     user names specific items they want, to confirm exact names and prices
-    before adding to cart. Returns JSON — summarize it naturally for the
+    before adding to cart. Returns JSON, summarize it naturally for the
     user, don't dump raw JSON in your reply."""
     inv = get_menu_inventory()
     matches = match_requested_items(item_names, inv)
@@ -107,13 +107,25 @@ def check_items_available(item_names: list[str]) -> str:
 def check_item_options(item_names: list[str]) -> str:
     """Check what customization options (spice level, sauce, side choices,
     etc.) specific menu items have, and which are required vs optional.
-    item_names must be the EXACT menu names — use check_items_available
+    item_names must be the EXACT menu names, use check_items_available
     first if you're not sure of the exact spelling. Call this before adding
-    any item that might have required choices. Returns JSON — summarize it
-    naturally for the user, don't dump raw JSON in your reply."""
+    any item that might have required choices. Returns JSON, summarize it
+    naturally for the user, don't dump raw JSON in your reply.
+
+    Refuses to run while the store is closed (12pm to 5am Lagos time
+    daily), same as add_items_to_cart_tool and place_order_tool. Checking
+    the menu itself still works any time through get_full_menu and
+    check_items_available, only the steps that move toward actually
+    placing an order are blocked while closed."""
+    from browser_tools import get_store_hours_status
+
+    is_open, closed_note = get_store_hours_status()
+    if not is_open:
+        return json.dumps({"status": "closed", "message": closed_note})
+
     inv = get_menu_inventory()
     result = check_order_options(inv, item_names)
-    return json.dumps(result.model_dump())
+    return json.dumps({"status": "ok", **result.model_dump()})
 
 
 @tool
@@ -122,17 +134,31 @@ def add_items_to_cart_tool(items_json: str) -> str:
     [{"name": "BUFFALO TENDERS", "quantity": 1, "option_preferences": {}},
      {"name": "SHRIMP ISLAND", "quantity": 1, "option_preferences": {"Choose Sauce": ["Pink Sauce"]}}]
     Use exact menu names (from check_items_available). option_preferences
-    maps an option group name to the chosen label(s) — omit a group to get
+    maps an option group name to the chosen label(s), omit a group to get
     a sensible automatic default (cheapest choice if required, untouched
-    if optional). This does NOT charge anything — it just stages the cart.
-    Returns JSON — summarize it naturally for the user, don't dump raw JSON
-    in your reply."""
+    if optional). This does NOT charge anything, it just stages the cart.
+    Returns JSON, summarize it naturally for the user, don't dump raw JSON
+    in your reply.
+
+    Refuses to run while the store is closed (12pm to 5am Lagos time
+    daily). Jay's Diner's own site rejects cart changes outside those
+    hours too, so trying anyway doesn't just fail quietly, it fails in a
+    confusing way that looks like a random inventory glitch. Check the
+    store's hours first rather than attempting this and guessing why it
+    didn't work."""
+    from browser_tools import get_store_hours_status
+
+    is_open, closed_note = get_store_hours_status()
+    if not is_open:
+        return json.dumps({"status": "closed", "message": closed_note})
+
     inv = get_menu_inventory()
     raw_items = json.loads(items_json)
     cart_items = [CartItem(**i) for i in raw_items]
     results = _add_items_to_cart(inv, cart_items)
     total = sum(r.line_price_ngn or 0 for r in results if r.success)
     return json.dumps({
+        "status": "ok",
         "results": [r.model_dump() for r in results],
         "running_total_ngn": total,
     })
@@ -151,7 +177,7 @@ def place_order_tool(
     user_confirmed_final_total: bool = False,
     config: RunnableConfig = None,
 ) -> str:
-    """Place the REAL order — this creates an actual pending order that
+    """Place the REAL order, this creates an actual pending order that
     will need payment. items_json is the same format as
     add_items_to_cart_tool. delivery_or_pickup must be "delivery" or
     "takeaway". area is required for delivery (must be one of: Chevron,
@@ -162,8 +188,23 @@ def place_order_tool(
     that they want to place the order, AFTER you have shown them the
     exact items and total price. If you call this with
     user_confirmed_final_total=False (or omit it), this tool will NOT
-    place the order — it will instead tell you to summarize the order
-    and total and ask the user to confirm first."""
+    place the order, it will instead tell you to summarize the order
+    and total and ask the user to confirm first.
+
+    This also refuses to run at all while the store is closed (12pm to
+    5am Lagos time daily), regardless of confirmation. Browsing the menu
+    still works any time, only placing an order is blocked."""
+    from browser_tools import get_store_hours_status
+
+    is_open, closed_note = get_store_hours_status()
+    if not is_open:
+        # This message shows up directly in the order_failed card on the
+        # frontend, not just as context for the model. Keep it clean,
+        # customer-facing text only, no notes meant for the model. The
+        # system prompt already covers telling the customer they can
+        # still browse the menu, no need to repeat that here.
+        return json.dumps({"status": "failed", "message": closed_note})
+
     if not user_confirmed_final_total:
         return json.dumps({
             "status": "needs_confirmation",
@@ -193,20 +234,20 @@ def place_order_tool(
         return json.dumps({"status": "failed", "message": order_result.notes})
 
     # Remembered here (not sent back to the model) so get_transfer_details_tool
-    # can read it directly — keeps the Paystack public key and customer email
+    # can read it directly, keeps the Paystack public key and customer email
     # out of the model's context, and avoids relying on the model to
     # correctly carry those values forward into the next tool call.
     # Keyed by thread_id (injected automatically by LangGraph via
     # RunnableConfig, never exposed to the model's tool-calling schema) so
     # concurrent conversations from different users never clobber each
-    # other's order state — this used to be a single bare global, which
+    # other's order state, this used to be a single bare global, which
     # would have leaked one customer's order into another's payment flow
     # the moment two people used this at the same time.
     thread_id = (config or {}).get("configurable", {}).get("thread_id", "unknown")
     _last_order_results[thread_id] = order_result
 
     # Enrich each ordered item with its image + actual line price for the
-    # order-history detail view — cart_results already has the price, and
+    # order-history detail view, cart_results already has the price, and
     # inventory has the image, neither of which the model itself needs to
     # see, but the frontend does.
     inventory_by_name = {i.name: i for i in inv.items}
@@ -230,7 +271,7 @@ def place_order_tool(
     })
 
 
-# Keyed by thread_id, not a bare global — see the comment inside
+# Keyed by thread_id, not a bare global, see the comment inside
 # place_order_tool above for why this matters.
 _last_order_results: dict[str, PlaceOrderResult] = {}
 
@@ -241,7 +282,7 @@ def get_transfer_details_tool(config: RunnableConfig = None) -> str:
     returned status "placed"), call this with no arguments to prepare
     payment behind the scenes. This can take a few seconds since it
     involves loading the payment gateway. Returns JSON with the amount and
-    a reference — payment now happens entirely through a Monei payment
+    a reference, payment now happens entirely through a Monei payment
     card the interface shows the customer; you do not need or receive any
     bank/account details, and must never describe a manual bank transfer."""
     thread_id = (config or {}).get("configurable", {}).get("thread_id", "unknown")
@@ -259,7 +300,7 @@ def get_transfer_details_tool(config: RunnableConfig = None) -> str:
 
     # bank_name/account_number are deliberately withheld from what the
     # model sees, same reasoning as the Paystack public key/customer email
-    # above — a model that can see an account number will eventually
+    # above, a model that can see an account number will eventually
     # recite it regardless of what the system prompt says not to do.
     # api.py reads the real values via get_last_transfer_details() instead,
     # which never touches agent/LLM context. Also keyed by thread_id now,
@@ -277,7 +318,7 @@ _last_transfer_details_by_thread: dict[str, TransferDetails] = {}
 
 
 def get_last_transfer_details(thread_id: str) -> Optional[dict]:
-    """Backend-only accessor — NOT a tool, never exposed to the model.
+    """Backend-only accessor, NOT a tool, never exposed to the model.
     api.py calls this (with the SAME thread_id it used for this
     conversation turn) to get the real bank_name/account_number needed to
     actually execute the Monei payout, without those values ever having
@@ -316,7 +357,7 @@ Rules:
 - If a system message with saved checkout details is present, treat it as the default. Don't ask the user to repeat their name, phone, or address unless they want to change it or use a different address for this order.
 - Immediately after place_order_tool returns status "placed", call get_transfer_details_tool with no arguments. This prepares payment behind the scenes and can take a few seconds, that's normal. Once it succeeds, just tell the user their order is confirmed and ready for payment. The interface shows a secure Monei payment card for them to complete it. NEVER mention bank names, account numbers, or ask them to make a manual transfer. Payment happens entirely through the Monei card shown in the interface, not through anything you say.
 - Keep responses conversational and concise. This is a chat interface, not a report.
-- If the store isn't currently accepting orders, let the user know early.
+- If the store isn't currently accepting orders, let the user know early. Only get_full_menu and check_items_available work while closed, for browsing. check_item_options, add_items_to_cart_tool, and place_order_tool all refuse to run while closed and return status "closed" instead of doing anything, so once you know the store is closed (from an earlier menu check in this conversation, or from one of those tools telling you), don't call check_item_options or add_items_to_cart_tool at all, even if the user asks to order something. Just tell them directly the store is closed and when it reopens, they're welcome to keep browsing in the meantime.
 """
 
 
@@ -396,7 +437,7 @@ async def _get_agent():
 def _build_messages(user_message: str, checkout_context: Optional[dict]) -> list[dict]:
     """Prepend a system message with the logged-in user's saved checkout
     info, if any, so the model can use it without asking every time. Sent
-    every turn (not just the first) — small enough in size that the
+    every turn (not just the first), small enough in size that the
     context-bloat cost is worth not having to track "is this a new
     conversation" separately."""
     messages = []
@@ -404,7 +445,7 @@ def _build_messages(user_message: str, checkout_context: Optional[dict]) -> list
         messages.append({
             "role": "system",
             "content": (
-                "The logged-in user has a saved checkout profile — use these "
+                "The logged-in user has a saved checkout profile, use these "
                 "details by default when placing an order instead of asking "
                 "for them again, but confirm them with the user first and let "
                 "them override anything they want to change: "
@@ -419,7 +460,7 @@ def run_agent_turn(thread_id: str, user_message: str, checkout_context: Optional
     """Run one turn of the conversation. LangGraph's checkpointer keeps
     the full message history keyed by thread_id, so each call only needs
     the new user message. thread_id should already be scoped to the
-    authenticated user (see api.py) — this function doesn't enforce that
+    authenticated user (see api.py), this function doesn't enforce that
     itself, it just uses whatever key it's given.
 
     Note: the actual deployed frontend only ever calls stream_agent_turn
@@ -439,7 +480,7 @@ def run_agent_turn(thread_id: str, user_message: str, checkout_context: Optional
     return last_message.content
 
 # ---------------------------------------------------------------------------
-# Streaming — SSE event protocol
+# Streaming, SSE event protocol
 # ---------------------------------------------------------------------------
 #
 # Event shapes, one JSON object per SSE "data:" line:
@@ -451,7 +492,7 @@ def run_agent_turn(thread_id: str, user_message: str, checkout_context: Optional
 #   {"type": "error", "message": "..."}
 #
 # "output" on tool_end is JSON-parsed when the tool returned JSON (which is
-# every tool now) — that's the payload a frontend uses to render custom UI
+# every tool now), that's the payload a frontend uses to render custom UI
 # (e.g. a menu grid with images) for that specific tool. Fall back to the
 # raw string if a tool ever returns plain text.
 
@@ -477,17 +518,17 @@ async def stream_agent_turn(
 ):
     """Async generator yielding SSE-formatted strings for one turn.
 
-    thread_id: the LangGraph checkpointer key — should be scoped to the
+    thread_id: the LangGraph checkpointer key, should be scoped to the
     authenticated user (e.g. "user:<user_id>:<conversation_id>") so one
     user can never read another user's conversation state, even by
     guessing or reusing a conversation_id. See api.py.
 
     conversation_id: the plain, client-facing ID echoed back in the
-    "start" event — deliberately NOT the same as thread_id, so the
+    "start" event, deliberately NOT the same as thread_id, so the
     user-scoping prefix never leaks to the client.
 
     checkout_context: the logged-in user's saved default checkout
-    profile (if any), injected as context every turn — see
+    profile (if any), injected as context every turn, see
     _build_messages."""
     config = {"configurable": {"thread_id": thread_id}}
     yield _sse({"type": "start", "conversation_id": conversation_id})

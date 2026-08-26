@@ -126,25 +126,27 @@ def _clean_price(text: str) -> float:
 LAGOS_TZ = ZoneInfo("Africa/Lagos")
 
 
-def _store_hours_status() -> tuple[bool, Optional[str]]:
-    """Jay's Diner is open daily 12pm (noon) to 5am the next day, Lagos time."""
+def get_store_hours_status() -> tuple[bool, Optional[str]]:
+    """Jay's Diner is open daily 12pm (noon) to 5am the next day, Lagos
+    time. Public (no leading underscore) since api.py and agent.py both
+    need this directly, not just get_menu_inventory below."""
     now = datetime.now(LAGOS_TZ)
     is_open = now.hour >= 12 or now.hour < 5
     if is_open:
         return True, None
     return False, (
         f"Jay's Diner is closed right now ({now.strftime('%I:%M %p')} WAT). "
-        "Open daily 12pm–5am."
+        "Open daily 12pm to 5am."
     )
 
 
 def _extract_product_image(product_div) -> Optional[str]:
     """Product cards put a small badge icon (chili-spice marker, "new"
-    badge) BEFORE the real product photo inside .image, e.g.:
+    badge) BEFORE the real product photo inside .image, for example:
       <img class="md-chili-icon" src=".../images/new_chilli.png">
       <img src="https://s3.../storage.jaysdinerng.com/.../thumb.webp">
     Badge icons are always served from jaysdinerng.com/images/, real
-    product photos always come from the S3 storage bucket, use that to
+    product photos always come from the S3 storage bucket. Use that to
     pick the right one instead of just taking the first <img>."""
     candidates = product_div.select(".image img")
     for img in candidates:
@@ -159,7 +161,7 @@ def get_menu_inventory() -> MenuInventoryResult:
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
 
-    store_accepting_orders, store_status_note = _store_hours_status()
+    store_accepting_orders, store_status_note = get_store_hours_status()
 
     # --- menu items ---
     items: list[MenuItem] = []
