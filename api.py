@@ -19,27 +19,53 @@ The response includes a conversation_id, send that back in the next
 request's body to continue the same conversation.
 """
 
+import asyncio
 import json
+import logging
 import os
 import uuid
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from agent import run_agent_turn, stream_agent_turn, get_last_transfer_details
 from auth.routes import router as auth_router
 from auth.dependencies import get_current_user
-from db.base import get_db
+from db.base import get_db, engine
 from db.models import User, CheckoutProfile, Order
 from profiles.routes import router as profiles_router
 from orders.routes import router as orders_router
 from connect.routes import router as connect_router
 
-app = FastAPI(title="Jay's Diner Ordering Agent")
+logger = logging.getLogger(__name__)
+
+async def _neon_keepalive():
+    while True:
+        await asyncio.sleep(4 * 60)
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            logger.debug("neon keep-alive ping ok")
+        except Exception as exc:
+            logger.warning("neon keep-alive ping failed: %s", exc)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_neon_keepalive())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(title="Jay's Diner Ordering Agent", lifespan=lifespan)
 
 # ALLOWED_ORIGINS is a comma-separated list of real frontend origins
 # (e.g. "https://your-app.up.railway.app,http://localhost:3000"). Falls
